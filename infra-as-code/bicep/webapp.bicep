@@ -179,12 +179,12 @@ resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   location: location
   kind: 'linux'
   sku: {
-    name: 'P1v3'
-    tier: 'PremiumV3'
-    capacity: 3
+    name: 'B1'
+    tier: 'Basic'
+    capacity: 1
   }
   properties: {
-    zoneRedundant: true
+    zoneRedundant: false
     reserved: true
   }
 }
@@ -391,151 +391,6 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
     IngestionMode: 'LogAnalytics'
     publicNetworkAccessForIngestion: 'Enabled'
     publicNetworkAccessForQuery: 'Enabled'
-  }
-}
-
-/*Promptflow app service*/
-// Web App
-resource webAppPf 'Microsoft.Web/sites@2023-12-01' = {
-  name: '${appName}-pf'
-  location: location
-  kind: 'linux'
-  identity: {
-    type: 'SystemAssigned, UserAssigned'
-    userAssignedIdentities: {
-      '${appServiceManagedIdentity.id}': {}
-    }
-  }
-  properties: {
-    serverFarmId: appServicePlan.id
-    virtualNetworkSubnetId: vnet::appServicesSubnet.id
-    httpsOnly: true
-    keyVaultReferenceIdentity: appServiceManagedIdentity.id
-    hostNamesDisabled: false
-    vnetImagePullEnabled: true
-    publicNetworkAccess: 'Disabled'
-    vnetRouteAllEnabled: true
-    vnetContentShareEnabled: true
-    siteConfig: {
-      linuxFxVersion: 'DOCKER|mcr.microsoft.com/appsvc/staticsite:latest'
-      vnetRouteAllEnabled: true
-      http20Enabled: true
-      publicNetworkAccess: 'Disabled'
-      alwaysOn: true
-      acrUseManagedIdentityCreds: true
-      acrUserManagedIdentityID: appServiceManagedIdentity.properties.clientId
-    }
-  }
-  dependsOn: [
-    appServiceSecretsUserRoleAssignmentModule
-    blobDataReaderRoleAssignment
-    containerRegistryPullRole
-  ]
-
-  resource appsettingsPf 'config' = {
-    name: 'appsettings'
-    properties: {
-      APPINSIGHTS_INSTRUMENTATIONKEY: appInsights.properties.InstrumentationKey
-      APPLICATIONINSIGHTS_CONNECTION_STRING: appInsights.properties.ConnectionString
-      ApplicationInsightsAgent_EXTENSION_VERSION: '~2'
-      WEBSITES_CONTAINER_START_TIME_LIMIT: '1800'
-      OPENAICONNECTION_API_BASE: azureOpenAI.properties.endpoint
-      WEBSITES_PORT: '8080'
-    }
-  }
-}
-
-// Prompt flow Web App diagnostic settings
-resource webAppPfDiagSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
-  name: 'default'
-  scope: webAppPf
-  properties: {
-    workspaceId: logWorkspace.id
-    logs: [
-      {
-        category: 'AppServiceHTTPLogs'
-        categoryGroup: null
-        enabled: true
-      }
-      {
-        category: 'AppServiceConsoleLogs'
-        categoryGroup: null
-        enabled: true
-      }
-      {
-        category: 'AppServiceAppLogs'
-        categoryGroup: null
-        enabled: true
-      }
-      {
-        category: 'AppServicePlatformLogs'
-        categoryGroup: null
-        enabled: true
-      }
-    ]
-    metrics: [
-      {
-        category: 'AllMetrics'
-        enabled: true
-      }
-    ]
-  }
-}
-
-resource appServicePrivateEndpointPf 'Microsoft.Network/privateEndpoints@2024-01-01' = {
-  name: appServicePfPrivateEndpointName
-  location: location
-  properties: {
-    subnet: {
-      id: vnet::privateEndpointsSubnet.id
-    }
-    privateLinkServiceConnections: [
-      {
-        name: appServicePfPrivateEndpointName
-        properties: {
-          privateLinkServiceId: webAppPf.id
-          groupIds: [
-            'sites'
-          ]
-        }
-      }
-    ]
-  }
-
-  resource appServicePfDnsZoneGroup 'privateDnsZoneGroups' = {
-    name: 'default'
-    properties: {
-      privateDnsZoneConfigs: [
-        {
-          name: 'privatelink.azurewebsites.net'
-          properties: {
-            privateDnsZoneId: appServiceDnsZone.id
-          }
-        }
-      ]
-    }
-  }
-}
-
-@description('Allow the prompt flow web app to pull container images from ACR.')
-resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(containerRegistry.id, appServiceManagedIdentity.id, containerRegistryPullRole.id)
-  scope: containerRegistry
-  properties: {
-    roleDefinitionId: containerRegistryPullRole.id
-    principalType: 'ServicePrincipal'
-    principalId: appServiceManagedIdentity.properties.principalId
-  }
-}
-
-@description('Allow the prompt flow web app to call into Azure OpenAI.')
-resource azureOpenAiUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(azureOpenAI.id, webAppPf.id, cognitiveServicesOpenAiUserRole.id)
-  scope: azureOpenAI
-  properties: {
-    roleDefinitionId: cognitiveServicesOpenAiUserRole.id
-    principalType: 'ServicePrincipal'
-    principalId: webAppPf.identity.principalId
   }
 }
 
