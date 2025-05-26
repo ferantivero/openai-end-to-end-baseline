@@ -8,8 +8,8 @@ param vnetName string
 @description('The name of the existing subnet within the identified vnet that will contains all the agents hosted for this workload.')
 param agentsSubnetName string
 
-@description('The name of the Azure AI Foundry hub.')
-param aiHubName string
+// @description('The name of the Azure AI Foundry hub.')
+// param aiHubName string
 
 @description('The name of the Azure AI Foundry project.')
 param chatProjectName string
@@ -95,10 +95,10 @@ resource cosmosDBOperatorRole 'Microsoft.Authorization/roleDefinitions@2022-04-0
 
 // ---- Azure AI Foundry existing resources ----
 
-@description('This is Azure AI Foundry hub.')
-resource aiHub 'Microsoft.MachineLearningServices/workspaces@2025-01-01-preview' existing = {
-  name: aiHubName
-}
+// @description('This is Azure AI Foundry hub.')
+// resource aiHub 'Microsoft.MachineLearningServices/workspaces@2025-01-01-preview' existing = {
+//   name: aiHubName
+// }
 
 @description('This is Azure AI Foundry chat project.')
 resource chatProject 'Microsoft.MachineLearningServices/workspaces@2025-01-01-preview' existing = {
@@ -142,14 +142,14 @@ resource projectCosmosDBOperatorForAgentsRoleAssignment 'Microsoft.Authorization
 
 // ---- Capability Hosts ----
 
-resource hubAgentsCapabilityHost 'Microsoft.MachineLearningServices/workspaces/capabilityHosts@2025-01-01-preview' = {
-  parent: aiHub
-  name: 'HubAgents'
-  properties: {
-    capabilityHostKind: 'Agents'
-    customerSubnet: vnet::agentsSubnet.id
-  }
-}
+// resource hubAgentsCapabilityHost 'Microsoft.MachineLearningServices/workspaces/capabilityHosts@2025-01-01-preview' = {
+//   parent: aiHub
+//   name: 'HubAgents'
+//   properties: {
+//     capabilityHostKind: 'Agents'
+//     customerSubnet: vnet::agentsSubnet.id
+//   }
+// }
 
 resource chatProjectCapabilityHost 'Microsoft.MachineLearningServices/workspaces/capabilityHosts@2025-01-01-preview' = {
   parent: chatProject
@@ -162,7 +162,7 @@ resource chatProjectCapabilityHost 'Microsoft.MachineLearningServices/workspaces
     threadStorageConnections: [cdbConnectionName]
   }
   dependsOn: [
-    hubAgentsCapabilityHost
+    // hubAgentsCapabilityHost
     projectSearchIndexDataContributorForAgentsRoleAssignment
     projectSearchServiceContributorForAgentsRoleAssignment
     projectCosmosDBOperatorForAgentsRoleAssignment
