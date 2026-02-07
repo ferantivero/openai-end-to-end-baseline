@@ -289,6 +289,33 @@ The AI agent definition would likely be deployed from your application's pipelin
    | :information: | The terminal displays the agent application’s response, verifying that the specified agent version is running inside the deployment. |
    | :--------: | :------------------------- |
 
+1. Delete the persisted agent and observe the impact on the deployment
+
+   *This step deletes the persisted agent definition from the data plane to test whether published deployments depend on the persisted agent at runtime.*
+
+   ```powershell
+   # Delete the persisted agent
+   az rest -u "https://${FOUNDRY_NAME}.services.ai.azure.com/api/projects/${FOUNDRY_PROJECT_NAME}/agents/${AGENT_ID}?api-version=2025-11-15-preview" -m "delete" --resource "https://ai.azure.com"
+   ```
+
+   ```powershell
+   # Confirm the persisted agent is gone (data plane)
+   az rest -u $FOUNDRY_AGENT_URL -m "get" --resource "https://ai.azure.com" --query "data[].{id:id, name:name}" -o table
+   ```
+
+   ```powershell
+   # Confirm the agent deployment resource still exists (control plane)
+   az rest -u "https://management.azure.com/subscriptions/$(az account show --query id -o tsv)/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.CognitiveServices/accounts/${FOUNDRY_NAME}/projects/${FOUNDRY_PROJECT_NAME}/applications/appchat/agentDeployments?api-version=2025-10-01-preview" -m "get" --query "value[].{name:name, state:properties.state}" -o table
+   ```
+
+   ```powershell
+   # Attempt to invoke the deployment — this will fail with "not found"
+   az rest -u $AGENT_RESPONSES_URL -m "post" --resource "https://ai.azure.com" -b '{\"input\": \"Say hello\"}' --query "{agent:agent.name, agent_version:agent.version,output:output[-1].content[0].text}"
+   ```
+
+   | :warning: | Deleting the persisted agent **breaks the published deployment**. While the agent deployment Azure resource remains visible in the control plane, the deployment can no longer invoke the agent and returns a "not found" error. The persisted agent definition is a runtime dependency, not just a publish-time snapshot. **Do not delete persisted agents that are referenced by active deployments.** |
+   | :--------: | :------------------------- |
+
 ### 3. Test the agent from the Foundry portal in the playground. *Optional.*
 
 | :warning: | The new Foundry portal experience does not currently support the end-to-end network isolation used in this architecture. Using this secured architecture, you will only be able to create and call your agents through the SDK or REST API; not interface with them in the Foundry portal. See, [How to use a virtual network with the Foundry Agent Service](https://learn.microsoft.com/azure/ai-foundry/agents/how-to/virtual-networks?view=foundry&preserve-view=true). These intermediate testing instructions will be updated when this experience is supported. |
