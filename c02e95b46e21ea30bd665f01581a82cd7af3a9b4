@@ -121,16 +121,74 @@ distinct halves:
 2. **Orchestration layer** (provider-agnostic): `AIAgent`, `RunAsync()`, multi-agent, tools
 
 We considered partial use — skip orchestration, just use the thin `RunAsync(prompt)` surface,
-which is cleaner than manually building `ResponseItem` arrays. However, the Foundry provider
-(#1) is the part that does not support our target endpoint: `PersistentAgentsClient` takes a
-project URL, `GetAIAgentAsync()` requires an agent ID (published apps bake the agent in), and
-the package is called `AzureAI.Persistent`.
+which is cleaner than manually building `ResponseItem` arrays.
 
-GitHub issue microsoft/agent-framework#2722 confirms application endpoints do not work.
+#### Key insight: the wire protocol is identical
 
-**What would flip this to a Go**: if Microsoft ships an application-endpoint provider or extends
-the existing one to accept application URLs. `RunAsync(prompt)` would be a nicer DX than raw
-`ResponseItem` arrays via the OpenAI SDK. Watch issue #2722 for progress.
+The application endpoint IS the project endpoint with a different URL path prefix and reduced
+features. The `POST /responses` wire format is the same on both:
+
+    Project:     https://{account}.../{project}/openai/responses
+    Application: https://{account}.../{project}/applications/{app}/protocols/openai/responses
+
+Same request body, same response format, same auth scheme. The barrier is NOT protocol
+incompatibility — it is SDK URL routing. `PersistentAgentsClient` and `AIProjectClient`
+hardcode path construction assuming the project URL structure. When given the application URL,
+they build wrong paths, resulting in 404s and missing `api-version` errors.
+
+#### The workaround exists
+
+The Microsoft team provided a "glass-breaking" workaround in issue #2722:
+
+    // 1. URL surgery — strip the tail, use /protocols as base
+    var clientOptions = new AIProjectClientOptions();
+    clientOptions.AddPolicy(new AddVersionPipelinePolicy(), PipelinePosition.PerCall);
+    string endpoint = "https://.../{project}/applications/{app}/protocols";
+    AIProjectClient client = new(new Uri(endpoint), new AzureCliCredential(), clientOptions);
+
+    // 2. Get a ChatClientAgent, patching out the model field (app bakes it in)
+    AIAgent agent = new ChatClientAgent(
+        client.GetProjectOpenAIClient().GetProjectResponsesClient().AsIChatClient(),
+        new ChatClientAgentOptions {
+            ChatOptions = new() {
+                RawRepresentationFactory = _ => {
+                    var opts = new ResponseCreationOptions();
+                    opts.Patch.Remove("$.model"u8);
+                    return opts;
+                }
+            }
+        }
+    );
+
+    await agent.RunAsync("Hello");  // Works against the application endpoint
+
+This proves the endpoint IS reachable from the Agent Framework. However it requires:
+- URL surgery (strip path suffix, use /protocols as base)
+- Custom pipeline policy to inject api-version query parameter
+- JSON patching to remove the `model` field (application endpoint bakes the model in)
+- Using `AIProjectClient` against a URL it was not designed for
+
+#### Comparison: Agent Framework workaround vs OpenAI SDK (Option B)
+
+| Aspect                 | OpenAI SDK (Option B)                         | Agent Framework workaround        |
+|------------------------|-----------------------------------------------|-----------------------------------|
+| Protocol match         | Native                                        | Same wire format                  |
+| Setup complexity       | `new OpenAIResponseClient(model, cred, opts)` | URL surgery + pipeline policy + JSON patch + AsIChatClient bridge |
+| Calling DX             | `client.CreateResponseAsync(items)`            | `agent.RunAsync("prompt")` — nicer |
+| Custom base URL        | First-class, documented feature                | Hack — relies on SDK internal path construction accepting modified URL |
+| Fragility on SDK update| Stable                                         | Could break — depends on undocumented internal routing |
+| Supported by authors   | Designed for this pattern                      | "Glass-breaking" workaround from MS team |
+
+The Agent Framework gives a nicer calling surface (`RunAsync(prompt)` vs building
+`ResponseItem` arrays), but at the cost of fragile setup that could break on any SDK update.
+The OpenAI SDK supports custom base URLs as a first-class feature — no hacks needed.
+
+#### What would flip this to a Go
+
+If Microsoft adds first-class application endpoint support to the Agent Framework's Foundry
+provider (accepting application URLs natively, handling model-field removal internally), this
+becomes the cleanest option. The protocol is already compatible — only the SDK routing needs
+to change. Watch issue microsoft/agent-framework#2722 for progress.
 
 Additionally, for our specific use case (thin chat UI client), the orchestration lives
 server-side in Foundry. Adding client-side orchestration would be redundant. If the app later
@@ -151,6 +209,11 @@ Application endpoint.
 4. **Future-proof** — any features added to the application endpoint will arrive via the
    Responses API, which this SDK natively supports
 5. **Zero wasted abstractions** — no dead code from project-scoped APIs we do not need
+6. **Stability over DX** — the Agent Framework offers a nicer calling surface
+   (`RunAsync(prompt)`) and CAN reach the application endpoint via a workaround, but the
+   workaround relies on URL surgery, custom pipeline policies, and JSON patching against
+   undocumented SDK internals. The OpenAI SDK supports custom base URLs as a first-class,
+   documented feature. We chose stability over marginal DX improvement.
 
 ### Migration Impact
 
