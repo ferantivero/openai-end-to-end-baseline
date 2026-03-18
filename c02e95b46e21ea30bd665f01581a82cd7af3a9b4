@@ -177,3 +177,68 @@ Application endpoint.
 - OpenAI .NET SDK: https://github.com/openai/openai-dotnet
 - Agent Framework Foundry provider: https://learn.microsoft.com/en-us/agent-framework/agents/providers/microsoft-foundry
 - Agent Framework application endpoint gap: https://github.com/microsoft/agent-framework/issues/2722
+
+## Appendix: Why Only the Responses API? (Responses vs Chat Completions)
+
+### Background — API Consolidation
+
+The Responses API (launched early 2025) is OpenAI's deliberate consolidation of three APIs
+into one:
+
+    Chat Completions (stateless chat)  ──┐
+    Assistants API (stateful agents)   ──┼──→  Responses API (unified)
+    Legacy Completions                 ──┘
+
+It is not an alternative to Chat Completions — it is its successor.
+
+### Capability Comparison
+
+| Capability                     | Chat Completions     | Responses API          |
+|--------------------------------|----------------------|------------------------|
+| Stateless prompt → response    | ✅                   | ✅                     |
+| Server-side state              | ❌                   | ✅ (previous_response_id, store: true) |
+| Built-in tools (web, code, file search) | ❌          | ✅ Native              |
+| Multimodal (text + images)     | Limited              | ✅ Native              |
+| Structured output (JSON schema)| Partial              | ✅ Native              |
+| Cache utilization              | Moderate             | ~80% better (OpenAI benchmarks) |
+| New model support (GPT-5+)    | Legacy only          | ✅ Primary             |
+
+For a simple "send prompt, get text" use case, both work identically. But agents inherently
+need tool use, state, and richer interaction — all Responses-native features that do not exist
+in Chat Completions.
+
+### Why the Application Endpoint Only Exposes Responses
+
+This is intentional, not a gap. Microsoft chose the forward-looking protocol for their newest
+endpoint type. Agent Applications need tools, structured outputs, and eventually stateful
+conversations — all Responses-native features. Adding Chat Completions support would mean
+exposing a legacy protocol on a new resource type designed for the future.
+
+### Deprecation Timeline
+
+| Event                                    | Date/Status          |
+|------------------------------------------|----------------------|
+| Responses API launched                   | Early 2025 — active, primary |
+| Chat Completions                         | Now — legacy, supported but no new features |
+| Chat Completions removed (OpenAI Codex)  | Feb 2026 — done      |
+| Assistants API sunset                    | Aug 26, 2026         |
+| Chat Completions general sunset          | TBD — no hard date, strongly discouraged for new projects |
+
+### Implications for Our Decision
+
+- Chat Completions is not coming to the application endpoint — Microsoft is moving forward.
+- Options C (Azure.AI.Inference) and D (Microsoft.Extensions.AI / IChatClient) are built on
+  Chat Completions, which further confirms they are not just technically incompatible today but
+  are architecturally misaligned with where the platform is heading.
+- Our choice of the OpenAI SDK with `ResponsesClient` (Option B) is aligned with both
+  OpenAI's and Microsoft's strategic direction.
+- The Responses API will be where all future investment goes — new models, new tools, new
+  features, and eventually the restoration of server-managed conversations on the application
+  endpoint.
+
+### References
+
+- OpenAI migration guide: https://developers.openai.com/api/docs/guides/migrate-to-responses
+- OpenAI deprecations tracker: https://developers.openai.com/api/docs/deprecations
+- Responses API announcement in Azure AI Foundry: https://devblogs.microsoft.com/foundry/introducing-new-tools-and-features-in-the-responses-api-in-azure-ai-foundry/
+- OpenAI migration pack: https://github.com/openai/completions-responses-migration-pack
