@@ -202,3 +202,33 @@ Both modes share the same Phase 1 and scoring logic. The only difference is whet
 - **Actionable output** — don't just say "region X failed"; say "region X works if you change storage from GZRS to GRS".
 - **Constraint-agnostic structure** — adding a new service (e.g., Cosmos DB SKU, network tier) means adding one more gather function and one more column, not restructuring the whole pipeline.
 - **Control plane friendly** — progressive narrowing keeps API call count low, respecting ARM rate limits.
+
+## API Optimization: Server-Side Filtering
+
+### Problem
+
+The two Phase 1 global calls differ vastly in cost:
+
+| Call | Unfiltered | Filtered | Reduction |
+|------|-----------|----------|-----------|
+| `az vm list-skus` | 4.6 MB (50k entries) | 1.5 MB (`--size Standard_D`) | 3x |
+| `az storage sku list` | 115 KB | 115 KB (already small) | — |
+
+### Server-side levers available
+
+The ARM API for `az vm list-skus` exposes only two server-side filters:
+
+| Parameter | Effect | Applicable? |
+|-----------|--------|-------------|
+| `--size <prefix>` | Prefix match on SKU name | **Yes** — `--size Standard_D` limits to D-family |
+| `--location <region>` | Single region only | **No** — we don't have a target region yet |
+
+There are **no** server-side filters for: flags (`s` vs `ads` vs `ls`), core count range, generation, or restriction status. These must all be filtered client-side.
+
+### Conclusion
+
+`--size Standard_D` is the **tightest server-side filter that covers our entire search space** (D-family with `s` flag, any cores ≥ requested, any generation). All further narrowing (exact flag matching via regex `D(\d+)s_v(\d+)`, core count, gen comparison) happens in Python at negligible cost.
+
+We have hit the ceiling of server-side optimization for Phase 1. Remaining options for faster repeat runs are architectural:
+- **Cache with TTL** — skip API calls if cached data is recent (VM SKU availability rarely changes)
+- **Parallel calls** — run VM and storage queries simultaneously
