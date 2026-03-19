@@ -33,9 +33,37 @@ Constraints are not binary. Each service has **alternative SKUs** that also sati
 | Storage (agent) | `Standard_GZRS` | `Standard_GRS` → `Standard_RAGRS` → `Standard_LRS` |
 | Storage (webapp) | `Standard_ZRS` | `Standard_LRS` |
 | AI Model | `Standard` | `DataZoneStandard` → `GlobalStandard` |
-| VM | `Standard_D2s_v3` | `Standard_D2s_v4` → `Standard_D2s_v5` |
+| VM | `Standard_D2s_v3` | Same spec different gen → more cores (see below) |
 
 Quota is the typical restriction that determines which tier is available in a given region.
+
+### VM Alternative Strategy
+
+VM SKU names encode their spec:
+
+```
+Standard_D 2 s _v3
+│         │ │ │  │
+│         │ │ │  └─ generation (v3, v4, v5, v6)
+│         │ │ └─── premium storage capable
+│         │ └───── core count
+│         └─────── family (D = general purpose)
+└──────────────── tier
+```
+
+Alternatives are derived programmatically from the naming convention — no hardcoded mapping needed. Parse the Bicep SKU, extract `{family}{cores}{flags}`, query for `Standard_{family}*{flags}_v*`.
+
+**Scoring tiers:**
+
+| Tier | Match | Example | Score | Notes |
+|------|-------|---------|-------|-------|
+| Exact | Same SKU | `D2s_v3` | 2 | Zero Bicep change |
+| Same spec, different gen | Same cores+flags, newer gen | `D2s_v4`, `D2s_v5`, `D2s_v6` | 1 | Equivalent capability, just generation bump |
+| More cores, same family | Higher cores, any gen | `D4s_v3`, `D4s_v4`, etc. | 1 | Works but overprovisioned, costs more |
+
+**Degradation order**: prefer newer generation at same core count (better price/perf, broader availability) before scaling up cores.
+
+**Phase 1 query**: `az vm list-skus` with broad `Standard_D*s_v*` filter — one global call returns all D-family premium-storage VMs across all regions. A region is only excluded from Phase 1 if it has **zero** D-family premium-storage VMs available. This keeps the candidate set maximally broad before the expensive model quota calls in Phase 2.
 
 ## Algorithm
 
