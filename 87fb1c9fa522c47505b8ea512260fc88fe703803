@@ -1,0 +1,53 @@
+## Preflight Architecture
+
+### Separation of concerns
+
+- **preflight.sh** (bash): orchestrator
+  - Env var validation
+  - All data fetching: az CLI calls + curl/jq (retail prices API)
+  - UX: spinner, progress output
+  - Phase 2 best-first B&B loop control flow
+  - Background name availability checks
+
+- **preflight-score.py** (python): scoring engine + output
+  - Pure scoring functions (VM, storage, app service, model, vCPU)
+  - Table formatting and output
+  - No data fetching, no UX
+
+### Why this split
+
+Each language does what it is best at. az/curl calls are native in bash.
+Scoring logic with data structures and pattern matching is natural in Python.
+Moving bash→Python would mean subprocess.run(["az",...]) which is less
+readable for no real gain. Moving Python→bash would mean jq gymnastics
+for scoring logic.
+
+### Subcommands (preflight-score.py)
+
+- **candidates**: Reads VM/storage/app data, intersects regions, scores
+  and ranks by Phase 1 criteria, prints table, saves full candidate
+  data to phase1.json for downstream subcommands.
+
+- **filter**: Binary gate for one region — given cached model quota data,
+  answers yes/no: "does this region have any usable model quota?"
+  Used by the B&B loop before investing in the heavier vCPU API call.
+
+- **delta**: Given one region with both model + vCPU data cached, loads
+  phase1.json, scores all constraints, prints the delta count (number
+  of Bicep changes needed) or NO-VIABLE. Used by the B&B loop to
+  decide whether a region is "good enough" to stop.
+
+- **report**: Loads phase1.json, scores model + vCPU for all candidates
+  that have cached data, prints the full results table sorted by total
+  score. Run once at the end after the B&B loop.
+
+### Data flow
+
+1. bash fires parallel fetches: curl→vm.json, az→sto.json, az→app-*.json
+2. python candidates: vm.json + sto.json + app-*.json → phase1.json
+3. bash B&B loop per region:
+   - az→{region}.model → python filter → yes/no
+   - az→{region}.vcpu  → python delta  → Δ count or NO-VIABLE
+   - break if Δ ≤ MAX_DELTA
+4. python report: phase1.json + all cached .model/.vcpu → final table
+5. bash collects background name availability results
