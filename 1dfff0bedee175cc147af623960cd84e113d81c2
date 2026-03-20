@@ -1,0 +1,13 @@
+Bug fixes needed in preflight scripts:
+
+1. preflight-score.py line 226: score_vcpu hardcodes 'D' in family name
+   - Parses family letter in group(1) but never stores it
+   - Produces wrong family name for any non-D-series VM (E, F, etc.)
+   - vCPU check silently returns (0, '-'), eliminating valid regions
+   - Fix: capture fam = m.group(1), use f'Standard {fam}{flags}v{gen} Family vCPUs'
+   - Reference: score_vm_restrictions (line 303) does this correctly
+
+2. preflight.sh lines 61-65: Bicep prefix greps fail silently
+   - If grep -oP finds no match, prefix var is empty
+   - Name checks then run against bare BASE_NAME, reporting bogus availability
+   - Fix: guard each prefix with [[ -n "$VAR" ]] || { echo 'warning'; skip; }
