@@ -59,3 +59,28 @@ What NOT to build:
   - Deployment ordering
   - Exhaustive Azure resource coverage (add types on demand)
   - DSL for fallback chains (ordered list is sufficient)
+
+Readability fixes (no behavior changes):
+
+preflight-score.py:
+  1. Extract parse_vm_sku() — same regex copy-pasted at lines 45, 220, 300.
+     One function returns (family, cores, flags, gen). Kills the hardcoded 'D'
+     bug in score_vcpu as a side effect — it would use parsed family letter.
+  2. Candidate dict keys are unreadable (vm_s, vmr_n, appq_s, etc.).
+     Replace with a dataclass: candidate.vm_score reads; c['vm_s'] doesn't.
+     Also eliminates the fragile key-crawling in _all_scores().
+  3. Short loop variables (vs, vn, s, n, c, g) → vm_score, vm_name, score,
+     name, cores, gen. Costs nothing.
+
+preflight.sh:
+  1. Fold repeated spin+wait (15 occurrences) into await_job helper:
+       await_job 'label' $PID ['fallback']
+     Orchestrator becomes a scannable list of WHAT is fetched.
+  2. Replace parallel arrays (NAME_PIDS[], NAME_CHECKS[], FILES[]) with
+     associative array. Three arrays indexed by position is fragile and
+     requires mental cross-referencing.
+
+Conclusion: five changes, all mechanical. No new features, no architecture
+changes, no behavior changes. parse_vm_sku is the only extraction that
+crosses into reuse — justified because reading the same regex three times
+IS the readability problem (and it fixes a bug).
