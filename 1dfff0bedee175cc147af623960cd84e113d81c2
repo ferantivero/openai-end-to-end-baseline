@@ -11,3 +11,51 @@ Bug fixes needed in preflight scripts:
    - If grep -oP finds no match, prefix var is empty
    - Name checks then run against bare BASE_NAME, reporting bogus availability
    - Fix: guard each prefix with [[ -n "$VAR" ]] || { echo 'warning'; skip; }
+
+Future plans: generalize preflight from single-deployment to manifest-driven engine
+
+Problem: every service is hardcoded twice (fetch in bash, score in Python).
+Adding a new service means editing both files, the orchestrator, scoring, formatting, and phase split.
+
+Target: constraint manifest (YAML) + constraint registry (Python plugins) + generic orchestrator.
+
+Deployment manifest (preflight.yaml):
+  - Declares constraints: type, sku, tier, fallbacks
+  - Declares name-availability checks by provider type
+  - Declares per-subscription limits (e.g. Bing 1/sub)
+  - Different deployments = different YAML files
+  - Adding a service = 3 lines in YAML, no code changes
+
+Constraint registry:
+  - Each type registers: phase (global|regional), fetch_cmd, score_fn, fallback_chain
+  - Existing score_* functions become plugin score() methods verbatim
+  - Types: compute/vm-sku, storage/account-sku, web/app-plan, cognitive/model,
+    cognitive/ai-services, search/service, region/zones, etc.
+  - New constraint type = one @register class
+
+Generic orchestrator (replaces hardcoded bash):
+  1. Load manifest
+  2. Phase 1: run all global fetches in parallel, cache to .preflight/
+  3. Score + intersect + rank candidates
+  4. Phase 2: per-candidate regional fetches (best-first branch-and-bound)
+  5. Score, accept/reject, report
+
+What stays:
+  - All score_* functions (become plugins)
+  - 0/1/2 scoring model (eliminate/fallback/exact)
+  - Phase 1/Phase 2 split concept
+  - .preflight/ cache pattern
+  - Best-first branch-and-bound
+
+What changes:
+  - Hardcoded fallback dicts → per-constraint config in YAML or plugin
+  - Bash orchestrator → generic manifest-driven loop
+  - cmd_candidates/cmd_delta/cmd_report → one engine
+  - Output formatter → table driven by constraint list
+  - Name checks → generic per-provider-type lookup
+
+What NOT to build:
+  - Resource dependencies (Bicep/Terraform's job)
+  - Deployment ordering
+  - Exhaustive Azure resource coverage (add types on demand)
+  - DSL for fallback chains (ordered list is sufficient)
