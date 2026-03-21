@@ -1,0 +1,86 @@
+Bug fixes needed in preflight scripts:
+
+1. preflight-score.py line 226: score_vcpu hardcodes 'D' in family name
+   - Parses family letter in group(1) but never stores it
+   - Produces wrong family name for any non-D-series VM (E, F, etc.)
+   - vCPU check silently returns (0, '-'), eliminating valid regions
+   - Fix: capture fam = m.group(1), use f'Standard {fam}{flags}v{gen} Family vCPUs'
+   - Reference: score_vm_restrictions (line 303) does this correctly
+
+2. preflight.sh lines 61-65: Bicep prefix greps fail silently
+   - If grep -oP finds no match, prefix var is empty
+   - Name checks then run against bare BASE_NAME, reporting bogus availability
+   - Fix: guard each prefix with [[ -n "$VAR" ]] || { echo 'warning'; skip; }
+
+Future plans: generalize preflight from single-deployment to manifest-driven engine
+
+Problem: every service is hardcoded twice (fetch in bash, score in Python).
+Adding a new service means editing both files, the orchestrator, scoring, formatting, and phase split.
+
+Target: constraint manifest (YAML) + constraint registry (Python plugins) + generic orchestrator.
+
+Deployment manifest (preflight.yaml):
+  - Declares constraints: type, sku, tier, fallbacks
+  - Declares name-availability checks by provider type
+  - Declares per-subscription limits (e.g. Bing 1/sub)
+  - Different deployments = different YAML files
+  - Adding a service = 3 lines in YAML, no code changes
+
+Constraint registry:
+  - Each type registers: phase (global|regional), fetch_cmd, score_fn, fallback_chain
+  - Existing score_* functions become plugin score() methods verbatim
+  - Types: compute/vm-sku, storage/account-sku, web/app-plan, cognitive/model,
+    cognitive/ai-services, search/service, region/zones, etc.
+  - New constraint type = one @register class
+
+Generic orchestrator (replaces hardcoded bash):
+  1. Load manifest
+  2. Phase 1: run all global fetches in parallel, cache to .preflight/
+  3. Score + intersect + rank candidates
+  4. Phase 2: per-candidate regional fetches (best-first branch-and-bound)
+  5. Score, accept/reject, report
+
+What stays:
+  - All score_* functions (become plugins)
+  - 0/1/2 scoring model (eliminate/fallback/exact)
+  - Phase 1/Phase 2 split concept
+  - .preflight/ cache pattern
+  - Best-first branch-and-bound
+
+What changes:
+  - Hardcoded fallback dicts → per-constraint config in YAML or plugin
+  - Bash orchestrator → generic manifest-driven loop
+  - cmd_candidates/cmd_delta/cmd_report → one engine
+  - Output formatter → table driven by constraint list
+  - Name checks → generic per-provider-type lookup
+
+What NOT to build:
+  - Resource dependencies (Bicep/Terraform's job)
+  - Deployment ordering
+  - Exhaustive Azure resource coverage (add types on demand)
+  - DSL for fallback chains (ordered list is sufficient)
+
+Readability fixes (no behavior changes):
+
+preflight-score.py:
+  1. Extract parse_vm_sku() — same regex copy-pasted at lines 45, 220, 300.
+     One function returns (family, cores, flags, gen). Kills the hardcoded 'D'
+     bug in score_vcpu as a side effect — it would use parsed family letter.
+  2. Candidate dict keys are unreadable (vm_s, vmr_n, appq_s, etc.).
+     Replace with a dataclass: candidate.vm_score reads; c['vm_s'] doesn't.
+     Also eliminates the fragile key-crawling in _all_scores().
+  3. Short loop variables (vs, vn, s, n, c, g) → vm_score, vm_name, score,
+     name, cores, gen. Costs nothing.
+
+preflight.sh:
+  1. Fold repeated spin+wait (15 occurrences) into await_job helper:
+       await_job 'label' $PID ['fallback']
+     Orchestrator becomes a scannable list of WHAT is fetched.
+  2. Replace parallel arrays (NAME_PIDS[], NAME_CHECKS[], FILES[]) with
+     associative array. Three arrays indexed by position is fragile and
+     requires mental cross-referencing.
+
+Conclusion: five changes, all mechanical. No new features, no architecture
+changes, no behavior changes. parse_vm_sku is the only extraction that
+crosses into reuse — justified because reading the same regex three times
+IS the readability problem (and it fixes a bug).
