@@ -112,88 +112,122 @@ Works — it is just HTTP. But we would reimplement auth token lifecycle, reques
 response deserialization, and retry logic that the OpenAI SDK already provides. No advantage
 over Option B.
 
-### F: Microsoft Agent Framework — ❌ No-Go (today, revisit later)
+### F: Microsoft Agent Framework — ⚠️ Reassess (test required)
 
-This is NOT a platform-scoped SDK like Option A. It is a provider-agnostic framework with two
-distinct halves:
+The Agent Framework is a provider-agnostic runtime that produces a standard `AIAgent` with
+`RunAsync()`, streaming, sessions, and tool support. It has **multiple providers**, and our
+original assessment focused on the wrong one.
 
-1. **Provider layer** (Foundry-specific): `PersistentAgentsClient`, `GetAIAgentAsync()`
-2. **Orchestration layer** (provider-agnostic): `AIAgent`, `RunAsync()`, multi-agent, tools
+#### Original assessment (March 18): Foundry provider — ❌ No-Go
 
-We considered partial use — skip orchestration, just use the thin `RunAsync(prompt)` surface,
-which is cleaner than manually building `ResponseItem` arrays.
+We initially evaluated the **Foundry Agents provider** (`Microsoft.Agents.AI.AzureAI`), which
+uses `PersistentAgentsClient` / `AIProjectClient`. These clients hardcode project URL path
+construction, resulting in 404s when given an application endpoint URL.
 
-#### Key insight: the wire protocol is identical
+Issue microsoft/agent-framework#2722 tracked this gap. The discussion evolved:
 
-The application endpoint IS the project endpoint with a different URL path prefix and reduced
-features. The `POST /responses` wire format is the same on both:
+- **Dec 9** (@rogerbarreto, MS Agent Framework team): provided a glass-breaking workaround
+  using URL surgery, custom pipeline policy for `api-version`, and JSON patching to remove
+  the `model` field.
+- **Dec 11** (@trrwilson, Azure SDK team): clarified that `ProjectResponsesClient` already
+  accepts application endpoint URIs directly — no glass-breaking needed. Factory method
+  tracked at Azure/azure-sdk-for-net#54426.
 
-    Project:     https://{account}.../{project}/openai/responses
-    Application: https://{account}.../{project}/applications/{app}/protocols/openai/responses
+This path works but routes through `Azure.AI.Projects` (beta) and still requires the `model`
+field patch.
 
-Same request body, same response format, same auth scheme. The barrier is NOT protocol
-incompatibility — it is SDK URL routing. `PersistentAgentsClient` and `AIProjectClient`
-hardcode path construction assuming the project URL structure. When given the application URL,
-they build wrong paths, resulting in 404s and missing `api-version` errors.
+#### Reassessment (March 25): Azure OpenAI provider — the right framing
 
-#### The workaround exists
+The published agent application endpoint exposes **standard OpenAI Responses API**. This is
+not a Foundry-specific protocol — it is the same wire format as any Azure OpenAI deployment.
+The Agent Framework has a dedicated **Azure OpenAI provider** (`Microsoft.Agents.AI.OpenAI`)
+with a Responses client that speaks this protocol natively:
 
-The Microsoft team provided a "glass-breaking" workaround in issue #2722:
+    // docs: https://learn.microsoft.com/en-us/agent-framework/agents/providers/azure-openai
+    // NuGet: Azure.AI.OpenAI, Azure.Identity, Microsoft.Agents.AI.OpenAI (all prerelease)
 
-    // 1. URL surgery — strip the tail, use /protocols as base
-    var clientOptions = new AIProjectClientOptions();
-    clientOptions.AddPolicy(new AddVersionPipelinePolicy(), PipelinePosition.PerCall);
-    string endpoint = "https://.../{project}/applications/{app}/protocols";
-    AIProjectClient client = new(new Uri(endpoint), new AzureCliCredential(), clientOptions);
+    AzureOpenAIClient client = new AzureOpenAIClient(
+        new Uri(applicationEndpoint),      // the published agent URL
+        new DefaultAzureCredential());
 
-    // 2. Get a ChatClientAgent, patching out the model field (app bakes it in)
-    AIAgent agent = new ChatClientAgent(
-        client.GetProjectOpenAIClient().GetProjectResponsesClient().AsIChatClient(),
-        new ChatClientAgentOptions {
-            ChatOptions = new() {
-                RawRepresentationFactory = _ => {
-                    var opts = new ResponseCreationOptions();
-                    opts.Patch.Remove("$.model"u8);
-                    return opts;
-                }
-            }
-        }
-    );
+    var responsesClient = client.GetResponseClient(modelDeploymentName);
 
-    await agent.RunAsync("Hello");  // Works against the application endpoint
+    AIAgent agent = responsesClient.AsAIAgent(
+        instructions: "...",
+        name: "baseline-chatbot");
 
-This proves the endpoint IS reachable from the Agent Framework. However it requires:
-- URL surgery (strip path suffix, use /protocols as base)
-- Custom pipeline policy to inject api-version query parameter
-- JSON patching to remove the `model` field (application endpoint bakes the model in)
-- Using `AIProjectClient` against a URL it was not designed for
+    Console.WriteLine(await agent.RunAsync("Hello"));
 
-#### Comparison: Agent Framework workaround vs OpenAI SDK (Option B)
+This is the **same `AzureOpenAIClient`** we already use in Option B. The Agent Framework
+just wraps it with `.AsAIAgent()` to provide:
 
-| Aspect                 | OpenAI SDK (Option B)                         | Agent Framework workaround        |
-|------------------------|-----------------------------------------------|-----------------------------------|
-| Protocol match         | Native                                        | Same wire format                  |
-| Setup complexity       | `new OpenAIResponseClient(model, cred, opts)` | URL surgery + pipeline policy + JSON patch + AsIChatClient bridge |
-| Calling DX             | `client.CreateResponseAsync(items)`            | `agent.RunAsync("prompt")` — nicer |
-| Custom base URL        | First-class, documented feature                | Hack — relies on SDK internal path construction accepting modified URL |
-| Fragility on SDK update| Stable                                         | Could break — depends on undocumented internal routing |
-| Supported by authors   | Designed for this pattern                      | "Glass-breaking" workaround from MS team |
+- `RunAsync(prompt)` — string in, string out (no manual `ResponseItem[]` construction)
+- `RunStreamingAsync()` — built-in streaming
+- `create_session()` — built-in multi-turn session management
+- Function tools, tool approval, code interpreter, file search, web search, hosted MCP
 
-The Agent Framework gives a nicer calling surface (`RunAsync(prompt)` vs building
-`ResponseItem` arrays), but at the cost of fragile setup that could break on any SDK update.
-The OpenAI SDK supports custom base URLs as a first-class feature — no hacks needed.
+The key realization: we do NOT need the Foundry provider at all. The published endpoint IS an
+Azure OpenAI endpoint. The Azure OpenAI provider is the correct entry point.
 
-#### What would flip this to a Go
+#### Comparison: Option B vs Option F (Azure OpenAI provider)
 
-If Microsoft adds first-class application endpoint support to the Agent Framework's Foundry
-provider (accepting application URLs natively, handling model-field removal internally), this
-becomes the cleanest option. The protocol is already compatible — only the SDK routing needs
-to change. Watch issue microsoft/agent-framework#2722 for progress.
+| Aspect                 | Option B (current)                             | Option F (Azure OpenAI provider)              |
+|------------------------|------------------------------------------------|-----------------------------------------------|
+| Base client            | `AzureOpenAIClient`                            | Same `AzureOpenAIClient`                      |
+| Response client        | `client.GetResponseClient(model)`              | Same, then `.AsAIAgent()`                     |
+| Calling DX             | `CreateResponseAsync(ResponseItem[])` — manual | `RunAsync("prompt")` — string in, string out  |
+| Multi-turn             | Manual history accumulation in JS              | Built-in session management                   |
+| Streaming              | Manual `CreateResponseStreamingAsync`           | `RunStreamingAsync()` built-in                |
+| Tool support           | Manual tool handling                           | Function tools, MCP, code interpreter, search |
+| Custom base URL        | First-class                                    | Same — inherits from `AzureOpenAIClient`      |
+| Extra NuGet            | None beyond `Azure.AI.OpenAI` + `OpenAI` (GA) | `Microsoft.Agents.AI.OpenAI` (prerelease)     |
+| Model field            | Must pass model name                           | Must pass model name — **needs testing**      |
 
-Additionally, for our specific use case (thin chat UI client), the orchestration lives
-server-side in Foundry. Adding client-side orchestration would be redundant. If the app later
-evolves to need local tools or multi-agent composition, Option F layers on top of Option B —
-they are complementary, not competing.
+#### Open questions (must test before deciding)
+
+1. **Does `AzureOpenAIClient` accept the full application endpoint URL?** Our URL is:
+   `https://{account}.services.ai.azure.com/api/projects/{project}/applications/{app}/protocols/openai`
+   The Azure OpenAI provider docs show the standard resource endpoint format
+   (`https://<myresource>.openai.azure.com`). The application URL has a different structure.
+   Does `AzureOpenAIClient` route correctly, or does it append paths that break?
+
+2. **Model field handling.** The application endpoint bakes the model in. `GetResponseClient()`
+   requires a model/deployment name. What happens if we pass a dummy value? Does the endpoint
+   ignore it, or does it 400? If it fails, the `Patch.Remove("$.model")` workaround from
+   issue #2722 would be needed — but that was demonstrated on the Foundry provider path, not
+   the Azure OpenAI provider path.
+
+3. **Auth audience.** Our current Option B implementation sets the token audience to
+   `https://ai.azure.com`. Does `AzureOpenAIClient` use this audience by default for
+   Foundry-hosted endpoints, or does it default to the Azure OpenAI audience
+   (`https://cognitiveservices.azure.com`)? If the latter, we need to configure it.
+
+4. **api-version.** The application endpoint requires `api-version=2025-11-15-preview` in the
+   query string. Does `AzureOpenAIClient` inject this, or does it use a different default?
+
+#### What this means for our decision
+
+If all four questions resolve positively — the URL routes correctly, the model field is
+handled, auth works, and api-version is correct — then Option F via the Azure OpenAI provider
+becomes a compelling upgrade over Option B:
+
+- Same base client, same auth, same URL handling
+- Dramatically better DX: `RunAsync("prompt")` vs building `ResponseItem[]` arrays
+- Built-in session management replaces our manual JS history accumulation
+- Streaming, tools, MCP support come for free
+- The only cost is one additional prerelease NuGet package
+
+If any question fails, Option B remains the correct choice — it is GA, tested, and working
+in production today.
+
+#### Historical context: Foundry provider path (issue #2722)
+
+For reference, the Foundry provider path (`Microsoft.Agents.AI.AzureAI`) also works but
+routes through `Azure.AI.Projects` (beta) and was initially presented as requiring
+glass-breaking workarounds. The Azure SDK team later clarified that `ProjectResponsesClient`
+accepts application URIs directly. A factory method is planned (Azure/azure-sdk-for-net#54426).
+This path is viable but unnecessarily complex for our use case — the Azure OpenAI provider
+is the simpler, more direct route.
 
 ## Decision
 
@@ -233,13 +267,42 @@ Application endpoint.
   back via the same SDK
 - If client-side orchestration needs arise, Microsoft Agent Framework can be layered on top
 
+### Status Update (March 25, 2026)
+
+Option B is implemented, tested, and deployed. PR #91 is open and ready for review.
+
+However, reassessment of Option F revealed the **Azure OpenAI provider**
+(`Microsoft.Agents.AI.OpenAI`) as a potentially cleaner path that was not evaluated in the
+original decision. This provider wraps the same `AzureOpenAIClient` we already use, adding
+`RunAsync()` DX, built-in sessions, and tool support. See Option F section above for details.
+
+The decision stands pending testing. If the Azure OpenAI provider works against our published
+endpoint (URL routing, model field, auth audience, api-version all resolve), a follow-up PR
+migrating from raw `ResponsesClient` to `responsesClient.AsAIAgent()` would be a small,
+low-risk change — same base client, better DX.
+
+## Next Steps
+
+1. **Deploy a test environment** with the published agent endpoint accessible.
+2. **Test Option F (Azure OpenAI provider)** against the published endpoint:
+   - Create a minimal console app with `Microsoft.Agents.AI.OpenAI`
+   - Point `AzureOpenAIClient` at the application URL
+   - Call `GetResponseClient(model).AsAIAgent().RunAsync("Hello")`
+   - Validate: URL routing, model field handling, auth audience, api-version
+3. **If all four tests pass**: open a follow-up PR to migrate from raw `ResponsesClient`
+   to `responsesClient.AsAIAgent()`. This is additive — same base client, swap the calling
+   layer. Frontend simplifies (built-in session management replaces JS history accumulation).
+4. **If any test fails**: document the failure in this note, Option B remains the final answer.
+
 ## References
 
 - Published Agent Application docs: https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/publish-agent
 - Invoke via Responses API: https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/publish-responses
 - OpenAI .NET SDK: https://github.com/openai/openai-dotnet
+- Agent Framework Azure OpenAI provider: https://learn.microsoft.com/en-us/agent-framework/agents/providers/azure-openai
 - Agent Framework Foundry provider: https://learn.microsoft.com/en-us/agent-framework/agents/providers/microsoft-foundry
 - Agent Framework application endpoint gap: https://github.com/microsoft/agent-framework/issues/2722
+- Azure SDK factory method tracking: https://github.com/Azure/azure-sdk-for-net/issues/54426
 
 ## Appendix: Why Only the Responses API? (Responses vs Chat Completions)
 
